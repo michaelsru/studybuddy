@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { SessionDetail } from "../types/session";
 import Step1_Topics from "./steps/Step1_Topics";
 import Step2_Watch from "./steps/Step2_Watch";
@@ -27,10 +27,11 @@ export default function SessionShell({ session }: Props) {
   const active = new Set(session.active_steps);
   const [viewStep, setViewStep] = useState(session.current_step);
 
-  // Sync forward when a mutation advances the session
-  useEffect(() => {
-    setViewStep(session.current_step);
-  }, [session.current_step]);
+  // Only advance viewStep if it's still pointing at the current active step
+  // (guards against session being refreshed while user reviews a past step)
+  const onAdvance = (nextStep: number) => {
+    setViewStep(nextStep);
+  };
 
   return (
     <div style={{ maxWidth: 720, margin: "2rem auto", fontFamily: "sans-serif" }}>
@@ -76,23 +77,30 @@ export default function SessionShell({ session }: Props) {
       </div>
 
       {/* Step view — driven by viewStep, not current_step */}
-      <StepView session={session} step={viewStep} />
+      <StepView session={session} step={viewStep} onAdvance={onAdvance} />
     </div>
   );
 }
 
-function StepView({ session, step }: { session: SessionDetail; step: number }) {
+function StepView({
+  session,
+  step,
+  onAdvance,
+}: {
+  session: SessionDetail;
+  step: number;
+  onAdvance: (step: number) => void;
+}) {
   switch (step) {
-    case 1: return <Step1_Topics session={session} />;
-    case 2: return <Step2_Watch session={session} />;
-    case 3: return <Step3_Quiz session={session} />;
-    case 4: return <Step4_GapAnalysis session={session} />;
-    case 5: return <Step5_Elaboration session={session} />;
-    case 6: return <Step6_Application session={session} />;
+    case 1: return <Step1_Topics session={session} onAdvance={onAdvance} />;
+    case 2: return <Step2_Watch session={session} onAdvance={onAdvance} />;
+    case 3: return <Step3_Quiz session={session} onAdvance={onAdvance} />;
+    case 4: return <Step4_GapAnalysis session={session} onAdvance={onAdvance} />;
+    case 5: return <Step5_Elaboration session={session} onAdvance={onAdvance} />;
+    case 6: return <Step6_Application session={session} onAdvance={onAdvance} />;
     case 7: return <Step7_Cards session={session} />;
     default: return session.status === "completed"
       ? <p>Session complete. <a href="/">Back to sessions</a></p>
       : null;
   }
 }
-

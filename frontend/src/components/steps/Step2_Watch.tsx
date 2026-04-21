@@ -2,12 +2,15 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { SessionDetail } from "../../types/session";
 
-export default function Step2_Watch({ session }: { session: SessionDetail }) {
+export default function Step2_Watch({ session, onAdvance }: { session: SessionDetail; onAdvance: (step: number) => void }) {
   const qc = useQueryClient();
 
   const watched = useMutation({
     mutationFn: () => api.post<SessionDetail>(`/sessions/${session.id}/watched`, {}),
-    onSuccess: (s) => qc.setQueryData(["session", session.id], s),
+    onSuccess: (s) => {
+      qc.setQueryData(["session", session.id], s);
+      onAdvance(s.current_step);
+    },
   });
 
   return (

@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 aiosqlite
-google-generativeai
+google-genai
 python-dotenv
 httpx
 pydantic

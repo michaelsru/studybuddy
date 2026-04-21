@@ -30,7 +30,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi import WebSocket
+from buddy.session import ws as elab_ws
+
 app.include_router(session_router)
+
+
+@app.websocket("/sessions/{session_id}/elaboration")
+async def elaboration_endpoint(session_id: str, websocket: WebSocket):
+    await elab_ws.elaboration_ws(session_id, websocket)
+
 
 
 @app.get("/health")

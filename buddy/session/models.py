@@ -57,6 +57,9 @@ class CardCommit(BaseModel):
 class QuizQuestion(BaseModel):
     id: str
     question_text: str
+    question_type: str   # multiple_choice | fill_blank | calculation | short_answer
+    options: list[str] | None
+    difficulty: str      # easy | medium | hard
     topic: str | None
 
 
@@ -66,6 +69,7 @@ class QuizAnswer(BaseModel):
     answer_text: str
     score: Score
     feedback: str
+    answer_key: str | None  # revealed post-submission
 
 
 class GapAnalysis(BaseModel):
@@ -133,3 +137,66 @@ class SessionDetail(BaseModel):
     elaboration_turns: list[ElaborationTurn]
     application: ApplicationOut | None
     card_proposals: list[CardProposal]
+
+
+# ── Gemini output schemas ────────────────────────────────────────────────────
+
+class QuizQuestionItem(BaseModel):
+    question_text: str
+    question_type: str  # multiple_choice | fill_blank | calculation | short_answer
+    difficulty: str     # easy | medium | hard
+    options: list[str] | None = None
+    answer_key: str
+
+
+class QuizWorksheetOut(BaseModel):
+    questions: list[QuizQuestionItem]
+
+
+# Keep alias so any remaining references don't break
+QuizQuestionsOut = QuizWorksheetOut
+
+
+class AnswerScore(BaseModel):
+    question_id: str
+    score: Score
+    feedback: str
+    answer_key: str | None = None  # echoed back for UI reveal
+
+
+class ScoringOut(BaseModel):
+    answers: list[AnswerScore]
+
+
+class GapAnalysisOut(BaseModel):
+    strong_areas: list[str]
+    weak_areas: list[str]
+    missing_areas: list[str]
+
+
+class PrimingOut(BaseModel):
+    questions: list[str]
+
+
+class CardSpec(BaseModel):
+    front: str
+    back: str
+    card_type: CardType
+    tags: list[str]
+    is_gap_card: bool
+
+
+class CardProposalsOut(BaseModel):
+    cards: list[CardSpec]
+
+
+class ApplicationChallengeOut(BaseModel):
+    challenge_text: str
+
+
+class SuggestCloseOut(BaseModel):
+    suggest_close: bool
+
+
+class ApplicationFeedbackOut(BaseModel):
+    feedback: str

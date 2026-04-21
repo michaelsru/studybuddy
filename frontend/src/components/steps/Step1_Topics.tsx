@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { SessionDetail } from "../../types/session";
 
-export default function Step1_Topics({ session }: { session: SessionDetail }) {
+export default function Step1_Topics({ session, onAdvance }: { session: SessionDetail; onAdvance: (step: number) => void }) {
   const [text, setText] = useState("");
   const qc = useQueryClient();
 
@@ -12,7 +12,10 @@ export default function Step1_Topics({ session }: { session: SessionDetail }) {
       api.post<SessionDetail>(`/sessions/${session.id}/topics`, {
         topics: text.split("\n").map((t) => t.trim()).filter(Boolean),
       }),
-    onSuccess: (s) => qc.setQueryData(["session", session.id], s),
+    onSuccess: (s) => {
+      qc.setQueryData(["session", session.id], s);
+      onAdvance(s.current_step);
+    },
   });
 
   // Review mode — topics already submitted

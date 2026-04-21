@@ -31,7 +31,11 @@ CREATE TABLE IF NOT EXISTS quiz_questions (
     session_id      TEXT NOT NULL REFERENCES sessions(id),
     topic_id        TEXT REFERENCES session_topics(id),
     question_text   TEXT NOT NULL,
-    position        INTEGER NOT NULL
+    position        INTEGER NOT NULL,
+    question_type   TEXT NOT NULL DEFAULT 'short_answer',
+    options         TEXT,
+    difficulty      TEXT NOT NULL DEFAULT 'medium',
+    answer_key      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS quiz_answers (

@@ -12,17 +12,32 @@ from buddy.db.deps import get_db_dep
 from buddy.session import manager
 from buddy.tools import anki
 from buddy.tools.anki import AnkiConnectError, AnkiUnavailableError
+from buddy.gemini import client as gemini
+from buddy.gemini.client import GeminiError
+from buddy.gemini.prompts import quiz as quiz_prompt
+from buddy.gemini.prompts import gap_analysis as gap_prompt
+from buddy.gemini.prompts import priming as priming_prompt
+from buddy.gemini.prompts import card_generation as card_prompt
+from buddy.gemini.prompts import application as app_prompt
 from buddy.session.models import (
     AnswersSubmit,
     ApplicationSubmit,
+    ApplicationChallengeOut,
     CardCommit,
     CardProposal,
+    CardProposalsOut,
     CardType,
     GapAnalysis,
+    GapAnalysisOut,
     ElaborationTurn,
     ApplicationOut,
+    ApplicationFeedbackOut,
+    PrimingOut,
     QuizAnswer,
     QuizQuestion,
+    QuizQuestionsOut,
+    QuizWorksheetOut,
+    ScoringOut,
     Score,
     Preset,
     SessionCreate,
@@ -33,6 +48,7 @@ from buddy.session.models import (
 
 router = APIRouter()
 DB = Annotated[aiosqlite.Connection, Depends(get_db_dep)]
+logger = logging.getLogger(__name__)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -52,6 +68,8 @@ def _build_detail(
     app_row,
     cards,
 ) -> SessionDetail:
+    # answer_key revealed only after answers are submitted
+    qs_key_map = {r["id"]: r["answer_key"] for r in quiz_qs} if quiz_as else {}
     return SessionDetail(
         id=session["id"],
         title=session["title"],
@@ -68,6 +86,9 @@ def _build_detail(
             QuizQuestion(
                 id=r["id"],
                 question_text=r["question_text"],
+                question_type=r["question_type"] if r["question_type"] else "short_answer",
+                options=json.loads(r["options"]) if r["options"] else None,
+                difficulty=r["difficulty"] if r["difficulty"] else "medium",
                 topic=r["topic_id"],
             )
             for r in quiz_qs
@@ -79,6 +100,7 @@ def _build_detail(
                 answer_text=r["answer_text"],
                 score=r["score"],
                 feedback=r["feedback"],
+                answer_key=qs_key_map.get(r["question_id"]),
             )
             for r in quiz_as
         ],
@@ -184,13 +206,26 @@ async def submit_topics(session_id: str, body: TopicsSubmit, db: DB):
     title = f"{body.topics[0]} — {_date_label()}"
     await repo.update_session_title(db, session_id, title)
 
-    # Stub priming questions (Phase 3: replaced with Gemini call)
-    stub_priming = [
-        f"What do you already know about {body.topics[0]}?",
-        "What aspects are you most uncertain about?",
-        "What's the key outcome you expect from watching this?",
-    ]
-    await repo.insert_priming_questions(db, session_id, stub_priming, topic_ids[0])
+    # Anki gap check — degrades gracefully if Anki is closed
+    try:
+        gaps = await anki.anki_find_gaps(body.topics)
+    except AnkiUnavailableError:
+        logger.warning("Anki unavailable during priming — using gap-unaware prompt")
+        gaps = []
+
+    system, user = priming_prompt.build(body.topics, gaps)
+    try:
+        result = await gemini.generate(user, system, schema=PrimingOut)
+        questions = result.questions
+    except GeminiError as e:
+        logger.warning("Gemini priming failed, using fallback: %s", e)
+        questions = [
+            f"What do you already know about {body.topics[0]}?",
+            "What aspects are you most uncertain about?",
+            "What outcome do you expect from watching this?",
+        ]
+
+    await repo.insert_priming_questions(db, session_id, questions, topic_ids[0])
     await manager.advance_step(db, session_id, 1)
     return await _load_detail(db, session_id)
 
@@ -203,15 +238,31 @@ async def signal_watched(session_id: str, db: DB):
     manager.assert_step(session, 2)
 
     topics = await repo.get_topics(db, session_id)
-    topic = topics[0]["topic"] if topics else "the topic"
+    topic_names = [r["topic"] for r in topics]
 
-    # Stub quiz questions (Phase 3: replaced with Gemini call)
-    stub_questions = [
-        f"Explain the core concept of {topic} in your own words.",
-        f"What are the most important components of {topic}?",
-        f"Describe a scenario where understanding {topic} would be critical.",
-    ]
-    await repo.insert_quiz_questions(db, session_id, stub_questions)
+    system, user = quiz_prompt.build(topic_names)
+    try:
+        result = await gemini.generate(user, system, schema=QuizWorksheetOut)
+        question_dicts = [
+            {
+                "question_text": q.question_text,
+                "question_type": q.question_type,
+                "difficulty": q.difficulty,
+                "options": q.options,
+                "answer_key": q.answer_key,
+            }
+            for q in result.questions
+        ]
+    except GeminiError as e:
+        logger.warning("Gemini quiz generation failed, using fallback: %s", e)
+        topic = topic_names[0] if topic_names else "the topic"
+        question_dicts = [
+            {"question_text": f"Explain the core concept of {topic} in your own words.", "question_type": "short_answer", "difficulty": "medium", "options": None, "answer_key": ""},
+            {"question_text": f"What are the most important components of {topic}?", "question_type": "short_answer", "difficulty": "medium", "options": None, "answer_key": ""},
+            {"question_text": f"Describe a scenario where understanding {topic} would be critical.", "question_type": "short_answer", "difficulty": "hard", "options": None, "answer_key": ""},
+        ]
+
+    await repo.insert_quiz_questions(db, session_id, question_dicts)
     await manager.advance_step(db, session_id, 2)
     return await _load_detail(db, session_id)
 
@@ -223,28 +274,90 @@ async def submit_answers(session_id: str, body: AnswersSubmit, db: DB):
         raise HTTPException(status_code=404, detail="Session not found")
     manager.assert_step(session, 3)
 
-    # Stub scoring (Phase 3: real semantic scoring via Gemini)
-    answers = [
+    quiz_qs = await repo.get_quiz_questions(db, session_id)
+    qs_by_id = {r["id"]: dict(r) for r in quiz_qs}  # dict() so .get() works
+
+    # Build QA pairs with answer_key and options so Gemini marks against the key
+    qa_pairs = [
         {
             "question_id": a.question_id,
+            "question_text": qs_by_id.get(a.question_id, {}).get("question_text", ""),
+            "question_type": qs_by_id.get(a.question_id, {}).get("question_type", "short_answer"),
+            "options": json.loads(qs_by_id[a.question_id]["options"]) if (a.question_id in qs_by_id and qs_by_id[a.question_id]["options"]) else None,
+            "answer_key": qs_by_id.get(a.question_id, {}).get("answer_key", ""),
             "answer_text": a.answer_text,
-            "score": "partial",
-            "feedback": "Stub feedback — real scoring added in Phase 3.",
         }
         for a in body.answers
     ]
-    await repo.insert_quiz_answers(db, session_id, answers)
 
-    # Explicit gap analysis trigger site — swap stub for Gemini in Phase 3
-    await manager.run_gap_analysis(db, session_id, answers)
-    await manager.advance_step(db, session_id, 3)  # -> step 4
+    # Batch scoring — Gemini marks against answer key for all types
+    system, user = gap_prompt.build(qa_pairs)
+    try:
+        scoring = await gemini.generate(user, system, schema=ScoringOut)
+        scored = [
+            {
+                "question_id": s.question_id,
+                "answer_text": next((a.answer_text for a in body.answers if a.question_id == s.question_id), ""),
+                "score": s.score.value,
+                "feedback": s.feedback,
+            }
+            for s in scoring.answers
+        ]
+    except GeminiError as e:
+        logger.warning("Gemini scoring failed, using fallback: %s", e)
+        scored = [
+            {"question_id": a.question_id, "answer_text": a.answer_text, "score": "partial", "feedback": "Scoring unavailable."}
+            for a in body.answers
+        ]
 
-    # Stub first elaboration turn, then advance to step 5
-    await repo.append_elaboration_turn(
-        db, session_id, "buddy",
-        "Let's dig into the areas where you had gaps. What's your current understanding of the weak areas identified?"
-    )
-    await manager.advance_step(db, session_id, 4)  # -> step 5
+    await repo.insert_quiz_answers(db, session_id, scored)
+
+    # Gap analysis — second Gemini call using scored answers
+    strong, weak, missing = [], [], []
+    for s in scored:
+        if s["score"] == "strong":
+            strong.append(s["question_id"])
+        elif s["score"] == "missing":
+            missing.append(s["question_id"])
+        else:
+            weak.append(s["question_id"])
+
+    # Pass Q+A context for richer gap analysis
+    gap_qa = [
+        {
+            "question_id": s["question_id"],
+            "question_text": qs_by_id.get(s["question_id"], ""),
+            "answer_text": s["answer_text"],
+        }
+        for s in scored
+    ]
+    gap_system, gap_user = gap_prompt.build_gap_analysis(gap_qa, scored)
+    try:
+        gap_result = await gemini.generate(gap_user, gap_system, schema=GapAnalysisOut)
+        gap_dict = {
+            "strong_areas": gap_result.strong_areas,
+            "weak_areas": gap_result.weak_areas,
+            "missing_areas": gap_result.missing_areas,
+        }
+    except GeminiError as e:
+        logger.warning("Gemini gap analysis failed, using scoring fallback: %s", e)
+        gap_dict = {"strong_areas": strong, "weak_areas": weak, "missing_areas": missing}
+
+    await repo.upsert_gap_analysis(db, session_id, gap_dict)
+    await manager.advance_step(db, session_id, 3)  # → step 4
+
+    # Opening elaboration turn from Buddy
+    gap_row = await repo.get_gap_analysis(db, session_id)
+    if gap_row:
+        weak = json.loads(gap_row["weak_areas"])
+        missing = json.loads(gap_row["missing_areas"])
+        focus = ", ".join((weak + missing)[:3]) or "the studied topics"
+        opening = f"Let's explore your gaps in {focus}. What's your current mental model for this?"
+    else:
+        opening = "Let's dig into the areas where you had gaps. What's your current understanding?"
+
+    await repo.append_elaboration_turn(db, session_id, "buddy", opening)
+    await manager.advance_step(db, session_id, 4)  # → step 5
     return await _load_detail(db, session_id)
 
 
@@ -256,8 +369,17 @@ async def close_elaboration(session_id: str, db: DB):
     manager.assert_step(session, 5)
 
     gap = await repo.get_gap_analysis(db, session_id)
-    weak = json.loads(gap["weak_areas"]) if gap else ["the topic"]
-    challenge = f"Apply your understanding of {weak[0]}: describe a real-world scenario and how you would handle it."
+    weak = json.loads(gap["weak_areas"]) if gap else []
+    missing = json.loads(gap["missing_areas"]) if gap else []
+
+    system, user = app_prompt.build(weak_areas=weak, missing_areas=missing)
+    try:
+        result = await gemini.generate(user, system, schema=ApplicationChallengeOut)
+        challenge = result.challenge_text
+    except GeminiError as e:
+        logger.warning("Gemini application challenge failed, using fallback: %s", e)
+        focus = (weak + missing)[0] if (weak + missing) else "the topic"
+        challenge = f"Apply your understanding of {focus}: describe a real-world scenario and how you would handle it."
 
     await repo.upsert_application(db, session_id, challenge)
     await manager.advance_step(db, session_id, 5)
@@ -273,32 +395,63 @@ async def submit_application(session_id: str, body: ApplicationSubmit, db: DB):
 
     app_row = await repo.get_application(db, session_id)
     challenge = app_row["challenge_text"] if app_row else "Challenge"
-    feedback = None if body.response is None else "Stub feedback — real evaluation added in Phase 3."
+
+    # Generate real feedback via Gemini if user responded
+    if body.response is not None:
+        gap_row_for_feedback = await repo.get_gap_analysis(db, session_id)
+        weak_fb = json.loads(gap_row_for_feedback["weak_areas"]) if gap_row_for_feedback else []
+        miss_fb = json.loads(gap_row_for_feedback["missing_areas"]) if gap_row_for_feedback else []
+        fb_system, fb_user = app_prompt.build_feedback(challenge, body.response, weak_fb, miss_fb)
+        try:
+            fb_result = await gemini.generate(fb_user, fb_system, schema=ApplicationFeedbackOut)
+            feedback = fb_result.feedback
+        except GeminiError as e:
+            logger.warning("Gemini application feedback failed: %s", e)
+            feedback = "Unable to generate feedback at this time."
+    else:
+        feedback = None
     await repo.upsert_application(db, session_id, challenge, body.response, feedback)
 
     topics = await repo.get_topics(db, session_id)
-    topic = topics[0]["topic"] if topics else "the topic"
+    topic_names = [r["topic"] for r in topics]
+    gap_row = await repo.get_gap_analysis(db, session_id)
+    strong = json.loads(gap_row["strong_areas"]) if gap_row else []
+    weak = json.loads(gap_row["weak_areas"]) if gap_row else []
+    missing = json.loads(gap_row["missing_areas"]) if gap_row else []
+    elab_turns = await repo.get_elaboration_turns(db, session_id)
+    elab = [{"role": t["role"], "content": t["content"]} for t in elab_turns]
 
-    # Stub card proposals (Phase 3: real Gemini call)
-    stub_cards = [
-        {
-            "front": f"What is {topic}?",
-            "back": f"A foundational concept covered in your study session on {topic}.",
-            "card_type": "basic",
-            "tags": ["stub", topic.lower()[:20]],
-            "is_gap_card": False,
-            "duplicate_warning": False,
-        },
-        {
-            "front": f"Key mechanism of {topic}: {{{{c1::fill in after Phase 3}}}}",
-            "back": "",
-            "card_type": "cloze",
-            "tags": ["stub", "gap"],
-            "is_gap_card": True,
-            "duplicate_warning": False,
-        },
-    ]
-    await repo.insert_card_proposals(db, session_id, stub_cards)
+    system, user = card_prompt.build(
+        topics=topic_names,
+        strong_areas=strong,
+        weak_areas=weak,
+        missing_areas=missing,
+        elaboration_turns=elab,
+    )
+    try:
+        result = await gemini.generate(user, system, schema=CardProposalsOut)
+        cards = result.cards
+    except GeminiError as e:
+        logger.warning("Gemini card generation failed, using fallback: %s", e)
+        cards = []
+
+    # Check duplicates at generation time (advisory)
+    card_dicts = []
+    for card in cards:
+        try:
+            is_dupe = await anki.anki_check_duplicate(card.front)
+        except (AnkiUnavailableError, AnkiConnectError):
+            is_dupe = False
+        card_dicts.append({
+            "front": card.front,
+            "back": card.back,
+            "card_type": card.card_type.value,
+            "tags": card.tags,
+            "is_gap_card": card.is_gap_card,
+            "duplicate_warning": is_dupe,
+        })
+
+    await repo.insert_card_proposals(db, session_id, card_dicts)
     await manager.advance_step(db, session_id, 6)
     return await _load_detail(db, session_id)
 

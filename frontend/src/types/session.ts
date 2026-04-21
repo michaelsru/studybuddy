@@ -5,6 +5,9 @@ export type Score = "strong" | "partial" | "missing";
 export interface QuizQuestion {
   id: string;
   question_text: string;
+  question_type: "multiple_choice" | "fill_blank" | "calculation" | "short_answer";
+  options: string[] | null;
+  difficulty: "easy" | "medium" | "hard";
   topic: string | null;
 }
 
@@ -14,6 +17,7 @@ export interface QuizAnswer {
   answer_text: string;
   score: Score;
   feedback: string;
+  answer_key: string | null;
 }
 
 export interface GapAnalysis {

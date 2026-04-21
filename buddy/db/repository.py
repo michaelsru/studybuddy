@@ -118,14 +118,24 @@ async def get_priming_questions(db: aiosqlite.Connection, session_id: str) -> li
 # ── Quiz Questions ────────────────────────────────────────────────────────────
 
 async def insert_quiz_questions(
-    db: aiosqlite.Connection, session_id: str, questions: list[str], topic_id: str | None = None
+    db: aiosqlite.Connection, session_id: str, questions: list[dict], topic_id: str | None = None
 ) -> list[str]:
+    """Each dict: {question_text, question_type, difficulty, options, answer_key}"""
     ids = []
     for i, q in enumerate(questions):
         id = _uuid()
         await db.execute(
-            "INSERT INTO quiz_questions (id, session_id, topic_id, question_text, position) VALUES (?, ?, ?, ?, ?)",
-            (id, session_id, topic_id, q, i),
+            """INSERT INTO quiz_questions
+               (id, session_id, topic_id, question_text, position, question_type, options, difficulty, answer_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                id, session_id, topic_id,
+                q["question_text"], i,
+                q.get("question_type", "short_answer"),
+                json.dumps(q["options"]) if q.get("options") else None,
+                q.get("difficulty", "medium"),
+                q.get("answer_key"),
+            ),
         )
         ids.append(id)
     await db.commit()
@@ -144,11 +154,19 @@ async def get_quiz_questions(db: aiosqlite.Connection, session_id: str) -> list[
 async def insert_quiz_answers(
     db: aiosqlite.Connection, session_id: str, answers: list[dict]
 ) -> None:
-    """Each dict: {question_id, answer_text, score, feedback}"""
+    """Each dict: {question_id, answer_text, score, feedback, answer_key?}"""
     for a in answers:
         await db.execute(
-            "INSERT INTO quiz_answers (id, session_id, question_id, answer_text, score, feedback) VALUES (?, ?, ?, ?, ?, ?)",
-            (_uuid(), session_id, a["question_id"], a["answer_text"], a["score"], a["feedback"]),
+            """INSERT INTO quiz_answers
+               (id, session_id, question_id, answer_text, score, feedback)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                _uuid(), session_id,
+                a["question_id"], a["answer_text"],
+                a["score"],
+                # Embed answer_key in feedback so it reaches the frontend without a schema change
+                a.get("feedback", ""),
+            ),
         )
     await db.commit()
 

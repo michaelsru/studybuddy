@@ -2,7 +2,7 @@ import aiosqlite
 from pathlib import Path
 from buddy.config import DB_PATH
 
-_MIGRATION = Path(__file__).parent / "migrations" / "001_initial.sql"
+_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -15,7 +15,20 @@ async def get_db() -> aiosqlite.Connection:
 
 async def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    sql = _MIGRATION.read_text()
+    migration_files = sorted(_MIGRATIONS_DIR.glob("*.sql"))
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript(sql)
+        for path in migration_files:
+            if path.name == "001_initial.sql":
+                # Multi-statement DDL — use executescript
+                await db.executescript(path.read_text())
+            else:
+                # Incremental migrations — run per-statement, ignore duplicate errors
+                for statement in path.read_text().split(";"):
+                    stmt = statement.strip()
+                    if not stmt or stmt.startswith("--"):
+                        continue
+                    try:
+                        await db.execute(stmt)
+                    except Exception:
+                        pass  # e.g. duplicate column on ALTER TABLE
         await db.commit()
