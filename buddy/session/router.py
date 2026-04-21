@@ -1,13 +1,17 @@
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Annotated
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException
 
+from buddy.config import DEFAULT_ANKI_DECK
 from buddy.db import repository as repo
 from buddy.db.deps import get_db_dep
 from buddy.session import manager
+from buddy.tools import anki
+from buddy.tools.anki import AnkiConnectError, AnkiUnavailableError
 from buddy.session.models import (
     AnswersSubmit,
     ApplicationSubmit,
@@ -286,8 +290,8 @@ async def submit_application(session_id: str, body: ApplicationSubmit, db: DB):
             "duplicate_warning": False,
         },
         {
-            "front": f"Key mechanism of {topic}:",
-            "back": "{{c1::Fill this in after Phase 3 Gemini integration}}",
+            "front": f"Key mechanism of {topic}: {{{{c1::fill in after Phase 3}}}}",
+            "back": "",
             "card_type": "cloze",
             "tags": ["stub", "gap"],
             "is_gap_card": True,
@@ -325,15 +329,58 @@ async def get_cards(session_id: str, db: DB):
 
 @router.post("/sessions/{session_id}/cards/commit", response_model=SessionDetail)
 async def commit_cards(session_id: str, body: CardCommit, db: DB):
+    logger = logging.getLogger(__name__)
     session = await repo.get_session(db, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     manager.assert_step(session, 7)
 
-    # Only commit approved IDs — zero approved is valid
-    for card_id in body.approved_ids:
-        # Phase 2: real anki_add_card call goes here; stub uses None for note_id
-        await repo.update_card_committed(db, card_id, anki_note_id=None)
+    deck = session["target_deck"] or DEFAULT_ANKI_DECK
+
+    # Validate deck before touching anything
+    if body.approved_ids:
+        try:
+            if not await anki.anki_deck_exists(deck):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Anki deck '{deck}' not found. Create it in Anki or set target_deck on this session."
+                )
+        except AnkiUnavailableError:
+            raise HTTPException(status_code=503, detail="AnkiConnect unreachable — is Anki open?")
+
+    # Batch fetch — avoids N+1
+    proposals = await repo.get_card_proposals_by_ids(db, body.approved_ids)
+
+    # Mark approved in DB upfront so frontend can distinguish approved-but-failed
+    for proposal in proposals:
+        await repo.update_card_approved(db, proposal["id"])
+
+    for proposal in proposals:
+        try:
+            is_dupe = await anki.anki_check_duplicate(proposal["front"])
+        except (AnkiUnavailableError, AnkiConnectError) as e:
+            logger.warning("Anki check_duplicate failed for %s: %s", proposal["id"], e)
+            is_dupe = False
+
+        if is_dupe:
+            await repo.update_card_duplicate_warning(db, proposal["id"])
+            continue
+
+        try:
+            note_id = await anki.anki_add_card(
+                front=proposal["front"],
+                back=proposal["back"],
+                deck=deck,
+                tags=json.loads(proposal["tags"]),
+                card_type=proposal["card_type"],
+            )
+            await repo.update_card_committed(db, proposal["id"], anki_note_id=note_id)
+        except AnkiUnavailableError as e:
+            logger.error("AnkiConnect unavailable mid-commit: %s", e)
+            raise HTTPException(status_code=503, detail="AnkiConnect unavailable — partial commit saved")
+        except AnkiConnectError as e:
+            logger.warning("anki_add_card failed for %s: %s", proposal["id"], e)
 
     await repo.update_session_status(db, session_id, "completed")
     return await _load_detail(db, session_id)
+

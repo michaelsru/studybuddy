@@ -293,6 +293,32 @@ async def update_card_committed(
     await db.commit()
 
 
+async def update_card_approved(db: aiosqlite.Connection, card_id: str) -> None:
+    await db.execute(
+        "UPDATE card_proposals SET approved = 1 WHERE id = ?", (card_id,)
+    )
+    await db.commit()
+
+
+async def get_card_proposals_by_ids(
+    db: aiosqlite.Connection, ids: list[str]
+) -> list[aiosqlite.Row]:
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    async with db.execute(
+        f"SELECT * FROM card_proposals WHERE id IN ({placeholders})", ids
+    ) as cur:
+        return await cur.fetchall()
+
+
+async def update_card_duplicate_warning(db: aiosqlite.Connection, card_id: str) -> None:
+    await db.execute(
+        "UPDATE card_proposals SET duplicate_warning = 1 WHERE id = ?", (card_id,)
+    )
+    await db.commit()
+
+
 async def count_committed_cards(db: aiosqlite.Connection, session_id: str) -> int:
     async with db.execute(
         "SELECT COUNT(*) FROM card_proposals WHERE session_id = ? AND committed = 1", (session_id,)

@@ -1,6 +1,17 @@
 import pytest
+import respx
+import httpx
 from httpx import AsyncClient, ASGITransport
 from buddy.main import app
+from buddy.config import ANKICONNECT_URL
+
+
+def _mock_anki_add(note_id: int = 1234):
+    """Returns a respx route that mocks anki_check_duplicate (no dupe) + anki_add_card."""
+    return respx.post(ANKICONNECT_URL).mock(side_effect=[
+        httpx.Response(200, json={"result": [], "error": None}),   # check_duplicate → no dupe
+        httpx.Response(200, json={"result": note_id, "error": None}),  # add_card → note_id
+    ])
 
 
 @pytest.fixture
@@ -68,9 +79,20 @@ async def test_full_sequence(client):
     assert data["current_step"] == 7
     assert len(data["card_proposals"]) == 2
 
-    # Commit all cards
+    # Commit all cards — mock AnkiConnect so test doesn't require Anki open
     card_ids = [c["id"] for c in data["card_proposals"]]
-    r = await client.post(f"/sessions/{sid}/cards/commit", json={"approved_ids": card_ids})
+    with respx.mock:
+        # 1. deckNames (deck validation) → deck exists
+        # 2+3. check_duplicate + add_card for card 1
+        # 4+5. check_duplicate + add_card for card 2
+        respx.post(ANKICONNECT_URL).mock(side_effect=[
+            httpx.Response(200, json={"result": ["Default"], "error": None}),  # deckNames
+            httpx.Response(200, json={"result": [], "error": None}),            # check card 1
+            httpx.Response(200, json={"result": 1001, "error": None}),         # add card 1
+            httpx.Response(200, json={"result": [], "error": None}),            # check card 2
+            httpx.Response(200, json={"result": 1002, "error": None}),         # add card 2
+        ])
+        r = await client.post(f"/sessions/{sid}/cards/commit", json={"approved_ids": card_ids})
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "completed"
@@ -101,10 +123,18 @@ async def test_partial_commit(client):
     r = await client.get(f"/sessions/{sid}")
     cards = r.json()["card_proposals"]
     # Approve only the first card
-    r = await client.post(
-        f"/sessions/{sid}/cards/commit",
-        json={"approved_ids": [cards[0]["id"]]},
-    )
+    with respx.mock:
+        # 1. deckNames (deck validation) → deck exists
+        # 2+3. check_duplicate + add_card for the one approved card
+        respx.post(ANKICONNECT_URL).mock(side_effect=[
+            httpx.Response(200, json={"result": ["Default"], "error": None}),
+            httpx.Response(200, json={"result": [], "error": None}),
+            httpx.Response(200, json={"result": 2001, "error": None}),
+        ])
+        r = await client.post(
+            f"/sessions/{sid}/cards/commit",
+            json={"approved_ids": [cards[0]["id"]]},
+        )
     assert r.status_code == 200
     result = r.json()
     committed = [c for c in result["card_proposals"] if c["committed"]]
@@ -127,6 +157,7 @@ async def test_zero_approved_commit(client):
     await client.post(f"/sessions/{sid}/elaboration/close")
     await client.post(f"/sessions/{sid}/application", json={"response": None})
 
-    r = await client.post(f"/sessions/{sid}/cards/commit", json={"approved_ids": []})
+    with respx.mock:
+        r = await client.post(f"/sessions/{sid}/cards/commit", json={"approved_ids": []})
     assert r.status_code == 200
     assert r.json()["status"] == "completed"
