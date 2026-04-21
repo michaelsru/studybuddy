@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from buddy.db.database import init_db
+from buddy.session.router import router as session_router
 
 
 @asynccontextmanager
@@ -18,6 +19,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(session_router)
 
 
 @app.get("/health")

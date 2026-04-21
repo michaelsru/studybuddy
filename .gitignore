@@ -8,7 +8,7 @@ dist/
 build/
 
 # Env
-.env
+.env*
 
 # DB
 *.db
