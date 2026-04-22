@@ -7,7 +7,7 @@ Question types:
 - short_answer: open-ended question requiring explanation. answer_key is a model answer (2-4 sentences).
 
 Mix of difficulties: some easy recall, some medium application, some hard synthesis.
-Aim for 10–12 questions total with roughly: 3 MCQ, 2 fill_blank, 2 calculation, 3–5 short_answer.
+Aim for 20 questions total.
 All questions should be directly testable from the given topics."""
 
 
