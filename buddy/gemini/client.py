@@ -4,7 +4,7 @@ from typing import AsyncIterator, Type, TypeVar
 from pydantic import BaseModel
 from google import genai
 from google.genai import types
-from buddy.config import GEMINI_API_KEY, GEMINI_MODEL
+from buddy.config import GEMINI_API_KEY, GEMINI_MODEL, USE_VERTEX, VERTEX_PROJECT, VERTEX_LOCATION
 
 logger = logging.getLogger(__name__)
 
@@ -16,8 +16,13 @@ class GeminiError(Exception):
 
 
 def _client() -> genai.Client:
+    if USE_VERTEX:
+        # Uses Application Default Credentials — no API key needed
+        # Run: gcloud auth application-default login
+        return genai.Client(vertexai=True, project=VERTEX_PROJECT, location=VERTEX_LOCATION)
+    # AI Studio path
     if not GEMINI_API_KEY:
-        raise GeminiError("GEMINI_API_KEY not set")
+        raise GeminiError("GEMINI_API_KEY not set (or set GOOGLE_GENAI_USE_VERTEXAI=true for ADC)")
     return genai.Client(api_key=GEMINI_API_KEY)
 
 
